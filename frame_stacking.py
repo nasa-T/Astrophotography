@@ -121,7 +121,7 @@ if __name__ == "__main__":
             bar.next()
             
     proceed = False
-    remd_ims = [0,12,14,18,29]
+    remd_ims = []
     while not proceed:
         user = input(f"Choose which number image to view ({0}-{len(rgb_lights)-1})\nOr type 'c' to continue: ")
         if user == 'c':
