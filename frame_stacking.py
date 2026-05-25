@@ -10,6 +10,7 @@ import pickle as p
 from light_frame_processing import *
 from photutils.aperture import CircularAperture
 from scipy.ndimage import shift
+import glob
 
 def remove_from_list(l, e):
     if type(e) not in [list, tuple]:
@@ -28,6 +29,7 @@ def rotateImage(img, angle, pivot):
     return imgR[padY[0] : -padY[1], padX[0] : -padX[1]]
 
 def get_shifty(shift_dict, star_tabs, matches, ref=0):
+    #print(shift_dict, ref)
     assert ref in shift_dict
     for j in matches[ref]:
         # print(f'check {j}')
@@ -37,11 +39,16 @@ def get_shifty(shift_dict, star_tabs, matches, ref=0):
             b1 = star_tabs[ref][b1-1]
             a2 = star_tabs[j][a2-1]
             b2 = star_tabs[j][b2-1]
-            if ((a1['flux']/b1['flux']) > 1 and (a2['flux']/b2['flux']) < 1) or ((a1['flux']/b1['flux']) < 1 and (a2['flux']/b2['flux']) > 1): # if a1 matches better with b2 then switch
+            ref_dir = (np.atan2((a1['y_centroid'] - b1['y_centroid']),(a1['x_centroid'] - b1['x_centroid']))+2*np.pi)%(2*np.pi)
+            j_dir = (np.atan2((a2['y_centroid'] - b2['y_centroid']),(a2['x_centroid'] - b2['x_centroid']))+2*np.pi)%(2*np.pi)
+            
+            if np.abs(ref_dir - j_dir) > np.pi/2:
+            #if ((a1['flux']/b1['flux']) > 1 and (a2['flux']/b2['flux']) < 1) or ((a1['flux']/b1['flux']) < 1 and (a2['flux']/b2['flux']) > 1): # if a1 matches better with b2 then switch
                 a2, b2 = b2, a2
-            x_shift, y_shift = (a1['xcentroid'] - a2['xcentroid'], a1['ycentroid'] - a2['ycentroid'])
-            star_dist = np.sqrt((a1['xcentroid'] - b1['xcentroid'])**2 + (a1['ycentroid'] - b1['ycentroid'])**2)
-            im_dist = np.sqrt((b1['xcentroid'] - b2['xcentroid']+x_shift)**2 + (b1['ycentroid'] - b2['ycentroid']+y_shift)**2)
+                
+            x_shift, y_shift = (a1['x_centroid'] - a2['x_centroid'], a1['y_centroid'] - a2['y_centroid'])
+            star_dist = np.sqrt((a1['x_centroid'] - b1['x_centroid'])**2 + (a1['y_centroid'] - b1['y_centroid'])**2)
+            im_dist = np.sqrt((b1['x_centroid'] - b2['x_centroid']+x_shift)**2 + (b1['y_centroid'] - b2['y_centroid']+y_shift)**2)
             rot = np.arcsin(im_dist/star_dist)
             if ref in shift_dict:
                 x_shift, y_shift = shift_dict[ref][0]+x_shift, shift_dict[ref][1]+y_shift
@@ -56,44 +63,24 @@ def get_shifty(shift_dict, star_tabs, matches, ref=0):
     return shift_dict
 
 if __name__ == "__main__":
-    dir_path = 'M81+82_052424/'
-    light_files = [os.path.join(dir_path,f'DSC_{n:04}.NEF') for n in range(78,106)]
-    light_exp = 150 # exposure time in seconds
-    flat_exp = 12
-    dark_exp = 150
-    print('Reading Files...')
-    light_frames = np.array([rawpy.imread(file).raw_image for file in light_files])
-    master_bias = fits.open('master_bias.fits')[0].data
-    master_dark = fits.open('master_dark.fits')[0].data
-    master_flat = fits.open('master_flat.fits')[0].data
-
-    with open('light_frames_sections.p', 'rb') as f:
-        rgb_lights = p.load(f)
+    with open('light_frames.p', 'rb') as f:
+        rgb_lights = np.array(p.load(f), dtype=np.float16)
     
-    print('Calibrating Frames...')
-    processed_lights = []
-    for i, frame in enumerate(light_frames):
-        frame = frame - master_bias - master_dark*light_exp
-        frame /= master_flat
-        processed_lights.append(frame)
-
-    
-
     print('Finding Stars...')
     star_tables = []
     for light in rgb_lights:
         f = light[:,:,1]
-        finder = DAOStarFinder(12000,10,brightest=3)
-        star_tables.append(finder.find_stars(f))
+        finder = DAOStarFinder(12000,10,n_brightest=5)
+        star_tables.append(finder.find_stars(f.astype(np.float32)))
 
     dist_map_list = []
     for tab in star_tables:
         dist_map = {}
         for i, star in enumerate(tab):
             for star2 in tab[i+1:]:
-                dist_map[(star['id'], star2['id'])] = np.sqrt((star['xcentroid'] - star2['xcentroid'])**2 + (star['ycentroid'] - star2['ycentroid'])**2)
+                dist_map[(star['id'], star2['id'])] = np.sqrt((star['x_centroid'] - star2['x_centroid'])**2 + (star['y_centroid'] - star2['y_centroid'])**2)
         dist_map_list.append(dist_map)
-
+    
     ref = [] # index of reference frame
     max_count = 0
     matched_dicts = {}
@@ -120,36 +107,43 @@ if __name__ == "__main__":
             ref = [i]
         elif match_count == max_count:
             ref += [i]
+
     print(f'best ref(s) is/are {ref} with {max_count} matches')
 
     shifts = {ref[0]:(0,0,0)}
-    shifts = get_shifty(shifts,star_tables, matched_dicts, 10)
+    shifts = get_shifty(shifts,star_tables, matched_dicts, ref[0])
     idxs = list(shifts.keys())
+    print(idxs)
     shifted_lights = {}
     with Bar("Aligning...", max=len(idxs)) as bar:
         for i in idxs:
-            shifted_lights[i] = shift(processed_lights[i], (shifts[i][1], shifts[i][0]))
+            shifted_lights[i] = shift(rgb_lights[i].astype(np.float32), (shifts[i][1], shifts[i][0], 0)).astype(np.float16)
             bar.next()
-    # [shift(processed_lights[i], (shifts[i][1], shifts[i][0])) for i in idxs]
+            
     proceed = False
-    remd_ims = [25,24,23,6]
+    remd_ims = [0,12,14,18,29]
     while not proceed:
-        user = input(f"Choose which number image to view ({0}-{len(light_files)-1})\nOr type 'c' to continue: ")
+        user = input(f"Choose which number image to view ({0}-{len(rgb_lights)-1})\nOr type 'c' to continue: ")
         if user == 'c':
             proceed = True
         elif int(user) in shifted_lights.keys():
-            plt.imshow(shifted_lights[int(user)])
+            plt.imshow(shifted_lights[int(user)][:,:,1])
             plt.show()
             user2 = input("Remove Image? (y/n)")
             if user2 == 'y':
                 remd_ims.append(int(user))
         else:
             print('Alignment for the given image has failed.')
+
+    print("Removing images from stack.")
     idxs = remove_from_list(idxs, remd_ims)
+    print("Stacking")
     to_stack = np.array([shifted_lights[i] for i in idxs])
-    stacked = np.median(to_stack, axis=0)
+    print(to_stack.max())
+    stacked = np.median(to_stack, axis=0, overwrite_input=True)
     print('Stacked')
-    hdu = fits.PrimaryHDU(stacked)
-    hdu.writeto('stacked_image.fits')
-    plt.imshow(stacked)
+    hdu = fits.PrimaryHDU(stacked.astype(np.float32))
+    hdu.writeto('stacked_image.fits', overwrite=True)
+    plt.imshow((stacked-stacked.min())/(stacked.max()-stacked.min()))
+    plt.show()
     
